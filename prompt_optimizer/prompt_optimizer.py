@@ -47,20 +47,37 @@ class OptimizableComponent:
         self.llm = llm
 
     def update(self):
+        """updates the component based on aggregated feedback"""
+        if not self.feedback:
+            logging.error(f"No feedback available for ``{self.name}``. Skipping update")
+            return
+
         feedback = self._aggregate_feedback()
         prompt = prompt_optimiser_prompt.format(
             component_value=self.value, feedback=feedback
         )
-        logging.info(f"Prompt for {self.name}: {prompt}")
 
-        response = self.llm.generate_text(prompt=prompt)
-        improved_prompt = extract_from_xml(response, "improved_prompt")
+        try:
+            response = self.llm.generate_text(prompt=prompt)
+            improved_value = self._extract_improved_value(response)
 
-        if len(improved_prompt) > 0:
-            self.value = improved_prompt[0]
+            if improved_value:
+                self.value = improved_value
+            else:
+                logging.warning(f"Failed to extract improved value for `{self.name}`")
+        except Exception as e:
+            logging.error(f"Error updating component `{self.name}`: {str(e)}")
 
-        logging.info(f"Updated value for {self.name}: {self.value}")
+        logging.info(f"Updated value for `{self.name}`: {self.value}")
         self.feedback.clear()
+
+    def _extract_improved_value(self, response: str) -> str:
+        """Extracts the improved value from the response."""
+        improved_prompt = extract_from_xml(response, "improved_prompt")
+        if not improved_prompt:
+            return None
+        else:
+            return improved_prompt[0]
 
     def generate_feedback(self, context: str, output: str, output_feedback: str) -> str:
         """
@@ -73,21 +90,21 @@ class OptimizableComponent:
             current_prompt=self.value,
             output_feedback=output_feedback,
         )
-
-        feedback = self.llm.generate_text(prompt=prompt)
-        logging.info(f"getting feedback for {self.name}\n{feedback}")
-        return feedback
+        try:
+            feedback = self.llm.generate_text(prompt=prompt)
+            logging.info(f"Generated feedback for `{self.name}`: {feedback}")
+            return feedback
+        except Exception as e:
+            logging.error(f"Error generating feedback for `{self.name}`: {str(e)}")
+            return ""
 
     def _aggregate_feedback(self):
         """
-        aggregates gradients by LLM sumarisation if required, concatination
+        Aggregates feedback by LLM sumarisation if required, concatination
         otherwise
         """
-        if len(self.feedback) == 0:
-            raise ValueError(f"No feedback available for {self.name}")
         agg_feedback = "\n".join(self.feedback)
         if len(agg_feedback) > 1000:
-            # summarise gradients
             prompt = dedent(
                 f"""
                 summarise the following feedback making sure to keep all
@@ -95,7 +112,10 @@ class OptimizableComponent:
                 {agg_feedback}
                 """
             )
-            agg_feedback = self.llm.generate_text(prompt=prompt)
+            try:
+                agg_feedback = self.llm.generate_text(prompt=prompt)
+            except Exception as e:
+                logging.error(f"Error summarising feedback for `{self.name}`: {str(e)}")
         return agg_feedback
 
 
@@ -112,7 +132,7 @@ class Node:
             for name, value in components.items()
         }
         self.name = func.__name__
-        self.call_history = []
+        self.call_history: List[Dict[str, Any]] = []
         self.signature = inspect.signature(func)
         self.context_params = context_params
         self.optimizer: "PipelineOptimizer" = None
@@ -130,29 +150,22 @@ class Node:
 
     def forward(self, *args, **kwargs) -> NodeOutput:
         """
-        Performs the forward pass.
-        It also updates the call history and handles dependencies between
-        nodes.
+        Performs the forward pass, updating the call history and handling
+        dependencies between nodes.
         """
-        logging.info(f"Node {self.name} input args: {args}")
-        logging.info(f"Node {self.name} input kwargs: {kwargs}")
         if self.optimizer is not None:
             self.optimizer._pre_node_execution(self.name, self.call_number)
         else:
-            logging.warning(f"node `{self.name}` has no optimizer attached")
+            logging.warning(f"Node ``{self.name}`` has no optimizer attached")
 
         bound_args = self._bind_args(args, kwargs)
-        logging.info(
-            f"Node {self.name} execution started with call number {self.call_number}"
-        )
-        logging.info(f"Node {self.name} arguments after binding: {bound_args}")
 
         try:
             result = self.func(*bound_args.args, **bound_args.kwargs)
         except Exception as e:
-            result = f"Error: {e}"
+            result = f"Error executing Node `{self.name}`: {e}"
 
-        logging.info(f"Node {self.name} execution result: {result}")
+        logging.info(f"Node `{self.name}` execution result: {result}")
 
         self._update_call_history(bound_args, result)
         if self.optimizer is not None:
@@ -160,6 +173,9 @@ class Node:
         return NodeOutput(self.name, self.call_number, result)
 
     def _bind_args(self, args, kwargs):
+        """
+        Binds arguments to the function signature and handles dependancies
+        """
         bound_args = self.signature.bind(*args, **kwargs)
         bound_args.apply_defaults()
 
@@ -178,6 +194,7 @@ class Node:
         return bound_args
 
     def _update_call_history(self, bound_args, result):
+        """Updates the call history with current execution data"""
         call_data = {
             "context": {
                 k: v
@@ -190,25 +207,30 @@ class Node:
 
     def backward(self, call_number: int):
         """Compute gradients for each component during the backward pass."""
-        logging.info(f"backwards pass through {self.name}")
+        logging.info(f"backwards pass through `{self.name}`")
         call_data = self.call_history[call_number]
         node_context = call_data["context"]
         node_output = call_data["output"]
 
         for component in self.components.values():
             dependencies = self.optimizer.dependencies.get((self.name, call_number), [])
-            output_feedback = []
-            if len(dependencies) == 0:
-                output_feedback.append(self.optimizer.feedback)
-            for dep_node, dep_comp in dependencies:
-                feedback = self.optimizer.nodes[dep_node].components[dep_comp].feedback
-                output_feedback.append(feedback)
+            output_feedback = self._collect_output_feedback(dependencies)
             feedback = component.generate_feedback(
                 node_context, node_output, output_feedback
             )
-            component.feedback.append(feedback)  #
+            component.feedback.append(feedback)
+
+    def _collect_output_feedback(self, dependancies):
+        """Collects feedback from dependant nodes or the optimizer"""
+        if not dependancies:
+            return [self.optimizer.feedback]
+        return [
+            self.optimizer.nodes[dep_node].components[dep_comp].feedback
+            for dep_node, dep_comp in dependancies
+        ]
 
     def set_optimizer(self, optimizer: "PipelineOptimizer"):
+        """Sets the optimizer for this Node and its components"""
         self.optimizer = optimizer
         for component in self.components.values():
             component.set_llm(optimizer.llm)
@@ -231,8 +253,7 @@ def llm_node(context_params: List[str] | None = None, **components):
 
         @wraps(func)
         def wrapper(*args, **kwargs):
-            result = node(*args, **kwargs)
-            return result
+            return node(*args, **kwargs)
 
         # add the node to the node_registry
         node_registry[func.__name__] = node
@@ -257,9 +278,8 @@ class PipelineOptimizer:
         self.feedback = ""  # AKA the Loss
 
     def _initialize_nodes(self):
-        logging.info("####################################################")
-        logging.info("################ initializing nodes ################")
-        logging.info("####################################################")
+        """Adds Nodes to Optimizer and assigns Optimizer to Nodes"""
+        logging.info("Attaching nodes to optimizer")
 
         for name, node in node_registry.items():
             node.set_optimizer(self)
@@ -284,9 +304,7 @@ class PipelineOptimizer:
         self.dependencies[from_key].add(to_key)
 
     def _reset_dependancies(self):
-        """
-        Clears the execution history and dependencies.
-        """
+        """Clears the execution history and dependencies."""
         self.execution_order.clear()
         self.dependencies.clear()
 
@@ -301,10 +319,7 @@ class PipelineOptimizer:
         unwrapped final output.
         """
         self._reset_dependancies()
-        logging.info(f"Pipeline input args: {args}")
-        logging.info(f"Pipeline input kwargs: {kwargs}")
         allowed_keys = inspect.signature(pipeline_func).parameters.keys()
-        logging.info(f"Pipeline keys: {allowed_keys}")
         filtered_kwargs = {k: v for k, v in kwargs.items() if k in allowed_keys}
         final_output = pipeline_func(*args, **filtered_kwargs)
         if isinstance(final_output, NodeOutput):
@@ -357,7 +372,7 @@ class PipelineOptimizer:
             logging.info(f"#### Iteration {iter} ####")
             data_list = [data] if isinstance(data, dict) else data
             for item in data_list:
-                logging.info(f"Data item for iteration {iter}: {item}")
+                logging.info(f"## Data item: {item} ##")
                 try:
                     pipeline_output: NodeOutput = self.forward(pipeline_func, **item)
                     logging.info(
@@ -366,7 +381,6 @@ class PipelineOptimizer:
                     evaluation_prompt = evaluation_template.format(
                         pipeline_ouput=pipeline_output, **item
                     )
-                    logging.info(f"eval prompt: {evaluation_prompt}")
                     self.feedback = self.llm.generate_text(prompt=evaluation_prompt)
                     logging.info(f"Feedback for iteration {iter}: {self.feedback}")
                     self.backward()
@@ -378,54 +392,10 @@ class PipelineOptimizer:
 
         return {name: node.components for name, node in self.nodes.items()}
 
-
-# Example usage
-if __name__ == "__main__":
-    from textwrap import dedent
-    from openai import OpenAI
-    from patch_openai import patch_openai
-    from prompt_optimizer.prompt_optimizer import PipelineOptimizer
-    from prompt_optimizer.llm_adapters.openai_adapter import OpenAIAdapter
-
-    client = OpenAI()
-    client = patch_openai(client)
-
-    system_prompt = "you are a helpful assistent"
-    query = "what is the capital of France?"
-    golden_answer = "<answer>Paris</answer>"
-
-    llm = OpenAIAdapter(client)
-    optimizer = PipelineOptimizer(llm=llm)
-
-    @optimizer.llm_node(context_params="query", system_prompt=system_prompt)
-    def answer_query(query: str, system_prompt: str):
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": query},
-            ],
-        )
-        return response.choices[0].message.content.strip()
-
-    exact_match_evaluator = dedent(
-        """
-        Your task is to judge the quality if the response given by an AI assistent.
-        Below are the <question>, <assistent_response> and <expected_answer>.
-        A correct answer would be an exact string match between the <assistent_response> and the
-        <expected_answer>
-
-        <question>{query}</question>
-        <assistent_response>{pipeline_ouput}</assistent_response>
-        <expected_answer>{golden_answer}</expected_answer>
-        """
-    )
-
-    optimizer.optimize(
-        iterations=1,
-        pipeline_func=answer_query,
-        evaluation_template=exact_match_evaluator,
-        data={"query": query, "golden_answer": golden_answer},
-    )
-
-    answer_query(query)
+    def get_prompt_info(self):
+        info = ""
+        for node_key, node in self.nodes.items():
+            info += f"Node: `{node_key}`\n"
+            for component_key, component in node.components.items():
+                info += f"  {component_key}: {component.value}\n"
+        return info
