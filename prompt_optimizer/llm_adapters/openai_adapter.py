@@ -1,10 +1,10 @@
 from typing import Any, ParamSpec
-from prompt_optimizer.llm_adaptors.llm_adaptor import LLMAdapter
+from prompt_optimizer.llm_adapters.llm_adapter import LLMCallable
 
 P = ParamSpec("P")
 
 
-class OpenAIAdapter(LLMAdapter):
+class OpenAIAdapter(LLMCallable):
     def __init__(self, client: Any, *args: P.args, **kwargs: P.kwargs):
         self.client = client
         self.args = args

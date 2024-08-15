@@ -4,12 +4,13 @@ from textwrap import dedent
 from typing import Callable, Dict, List, Any, ParamSpec, Tuple, Union
 from functools import wraps
 import inspect
-from prompt_optimizer.llm_adaptors.llm_adaptor import LLMAdapter
-from prompt_optimizer.utils.extract_xml import extract_text_from_xml
-from prompts import (
+from prompt_optimizer.llm_adapters.llm_adapter import LLMCallable
+from prompt_optimizer.prompts import (
     prompt_optimiser_prompt,
     input_feedback_prompt,
 )
+from prompt_optimizer.utils.extract_from_xml import extract_from_xml
+
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
@@ -40,9 +41,9 @@ class OptimizableComponent:
         self.name = name
         self.value = value
         self.feedback = []
-        self.llm: LLMAdapter = None
+        self.llm: LLMCallable = None
 
-    def set_llm(self, llm: LLMAdapter):
+    def set_llm(self, llm: LLMCallable):
         self.llm = llm
 
     def update(self):
@@ -53,7 +54,7 @@ class OptimizableComponent:
         logging.info(f"Prompt for {self.name}: {prompt}")
 
         response = self.llm.generate_text(prompt=prompt)
-        improved_prompt = extract_text_from_xml(response, "improved_prompt")
+        improved_prompt = extract_from_xml(response, "improved_prompt")
 
         if len(improved_prompt) > 0:
             self.value = improved_prompt[0]
@@ -115,7 +116,7 @@ class Node:
         self.signature = inspect.signature(func)
         self.context_params = context_params
         self.optimizer: "PipelineOptimizer" = None
-        self.llm: LLMAdapter = None
+        self.llm: LLMCallable = None
 
     @property
     def call_number(self) -> int:
@@ -248,7 +249,7 @@ class PipelineOptimizer:
     and optimization process.
     """
 
-    def __init__(self, llm: LLMAdapter):
+    def __init__(self, llm: LLMCallable):
         self.llm = llm
         self.nodes: Dict[str, Node] = {}
         self.execution_order: List[Tuple[str, int]] = []
@@ -384,7 +385,7 @@ if __name__ == "__main__":
     from openai import OpenAI
     from patch_openai import patch_openai
     from prompt_optimizer.prompt_optimizer import PipelineOptimizer
-    from prompt_optimizer.llm_adaptors.openai_adaptor import OpenAIAdapter
+    from prompt_optimizer.llm_adapters.openai_adapter import OpenAIAdapter
 
     client = OpenAI()
     client = patch_openai(client)

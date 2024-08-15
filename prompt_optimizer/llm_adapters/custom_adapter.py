@@ -1,10 +1,10 @@
 from typing import Callable, Concatenate, ParamSpec
-from prompt_optimizer.llm_adaptors.llm_adaptor import LLMAdapter
+from prompt_optimizer.llm_adapters.llm_adapter import LLMCallable
 
 P = ParamSpec("P")
 
 
-class CustomAdapter(LLMAdapter):
+class CustomAdapter(LLMCallable):
     def __init__(
         self,
         generate_func: Callable[Concatenate[str, P], str],

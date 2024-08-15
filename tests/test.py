@@ -1,6 +1,6 @@
 from openai import OpenAI
 import pytest
-from prompt_optimizer.llm_adaptors.openai_adaptor import OpenAIAdapter
+from prompt_optimizer.llm_adapters.openai_adapter import OpenAIAdapter
 from prompt_optimizer.prompt_optimizer import PipelineOptimizer
 
 
