@@ -126,6 +126,7 @@ class OptimizableVariable(Variable):
 class NodeState:
     node: "Node"
     context: Dict[str, Any]
+    inputs: List[TransitionVariable]
     output: TransitionVariable
 
 
@@ -137,7 +138,7 @@ class Node:
         context_params: List[str],
     ):
         self.func = func
-        self.variable_dict = {
+        self.optimizable_variables = {
             name: OptimizableVariable(name, value) for name, value in variables.items()
         }
         self.name = func.__name__
@@ -182,23 +183,38 @@ class Node:
             if isinstance(input, TransitionVariable):
                 # extract (unwrap) Variable value
                 bound_args.arguments[arg_name] = input.value
-            if arg_name in self.variable_dict:
+            if arg_name in self.optimizable_variables:
                 # override OptimizableVariable value
-                bound_args.arguments[arg_name] = self.variable_dict[arg_name].value
+                bound_args.arguments[arg_name] = self.optimizable_variables[
+                    arg_name
+                ].value
 
         return bound_args
 
     def _set_current_state(self, bound_args: inspect.BoundArguments, result):
         """Creates a NodeVisit instance with the current execution data."""
+        inputVariables = self._extract_input_variables(bound_args)
+        context = self._extract_context(bound_args)
+
         self.current_state = NodeState(
             node=self,
-            context={
-                k: v
-                for k, v in bound_args.arguments.items()
-                if k in self.context_params
-            },
+            context=context,
+            inputs=inputVariables,
             output=result,
         )
+
+    def _extract_context(self, bound_args: inspect.BoundArguments):
+        context = {
+            k: v for k, v in bound_args.arguments.items() if k in self.context_params
+        }
+        return context
+
+    def _extract_input_variables(self, bound_args):
+        inputVariables = []
+        for arg_name, input in bound_args.arguments.items():
+            if isinstance(input, TransitionVariable):
+                inputVariables.append(input)
+        return inputVariables
 
     def backward(self, state: NodeState, program_feedback: str = None):
         """
@@ -208,9 +224,10 @@ class Node:
         node_context = state.context
         node_output = state.output
 
+        output_feedback = self._collect_output_feedback(program_feedback)
+
         # propegate feedback to input variables
-        for variable in self.variable_dict.values():
-            output_feedback = self._collect_output_feedback(program_feedback)
+        for variable in self.optimizable_variables.values():
             variable_feedback = variable.generate_feedback(
                 node_context, node_output, output_feedback
             )
@@ -227,7 +244,7 @@ class Node:
     def set_optimizer(self, optimizer: "Optimizer"):
         """Sets the optimizer for this Node and its components"""
         self.optimizer = optimizer
-        for variable in self.variable_dict.values():
+        for variable in self.optimizable_variables.values():
             variable.set_llm(optimizer.llm)
 
 
@@ -284,7 +301,7 @@ class Optimizer:
 
     def zero_grad(self):
         for node in self.nodes.values():
-            for variable in node.variable_dict.values():
+            for variable in node.optimizable_variables.values():
                 variable.feedback.clear()
 
     def forward(self, program_func: Callable, *args, **kwargs) -> Any:
@@ -317,7 +334,7 @@ class Optimizer:
 
     def step(self):
         for node in self.nodes.values():
-            for variable in node.variable_dict.values():
+            for variable in node.optimizable_variables.values():
                 variable.update()
 
     def optimize(
@@ -359,12 +376,12 @@ class Optimizer:
                     logging.error(f"An error occurred: {e}")
                     break
 
-        return {name: node.variable_dict for name, node in self.nodes.items()}
+        return {name: node.optimizable_variables for name, node in self.nodes.items()}
 
     def get_prompt_info(self):
         info = ""
         for node_key, node in self.nodes.items():
             info += f"Node: `{node_key}`\n"
-            for variable in node.variable_dict.values():
+            for variable in node.optimizable_variables.values():
                 info += f"  {variable.name}: {variable.value}\n"
         return info
