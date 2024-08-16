@@ -1,37 +1,37 @@
 # Prompt Optimizer
 
-Prompt Optimizer is a flexible and extensible framework designed to optimize components within a pipeline based on feedback. This project is heavily inspired by [TextGrad](https://github.com/zou-group/textgrad) but aims to be more adaptable and easier to integrate into existing projects. It leverages decorators for seamless integration and allows you to bring your own LLM providers. Additionally, it integrates well with libraries like LangSmith for observability and Instructor for structured output.
+Prompt Optimizer is a flexible and extensible framework designed to optimize variables within an LLM program based on feedback. This project is heavily inspired by [TextGrad](https://github.com/zou-group/textgrad) but aims to be more adaptable and easier to integrate into existing projects. It leverages decorators for seamless integration and allows you to bring your own LLM providers. Additionally, it integrates well with libraries like LangSmith for observability and Instructor for structured output.
 
 ## Features
 
 - **Flexible Integration**: Easily append to existing projects using decorators.
 - **Custom LLM Providers**: Bring your own LLM providers for generating and refining prompts.
 - **Observability**: Integrates with libraries like LangSmith for observability and supports structured output using Instructor.
-- **Feedback-Based Optimization**: Optimizes components based on "llm as judge" feedback.
+- **Feedback-Based Optimization**: Optimizes variables based on "llm as judge" feedback.
 
 ## Usage
 
 ### Defining Nodes
-Use the `llm_node` decorator to define nodes in your pipeline. Each node can have optimizable components (prompts) that will be refined based on feedback.
+Use the `llm_node` decorator to define nodes in your program. Each node can have optimizable variables (prompts) that will be refined based on feedback.
 
 ``` Python
-from pipeline_optimizer import llm_node
+from prompt_optimizer import llm_node
 
-@llm_node(context_params=["param1", "param2"], component1="value1", component2="value2")
-def example_node(param1, param2, component1, component2):
+@llm_node(context_params=["param1", "param2"], variable1="value1", variable2="value2")
+def example_node(param1, param2, variable1, variable2):
     # llm logic here
     return result
 ```
 
 ### Creating the Optimizer
-Create an instance of PipelineOptimizer and initialize it with your LLM provider.
+Create an instance of Optimizer and initialize it with your LLM provider.
 
-**Note**: these `LLMCallable`s are only used for feedback generation, the pipeline is completely defined by you!
+**Note**: these `LLMCallable`s are only used for feedback generation, the program is completely defined by you!
 
 ``` py
 # Instantiate an optimizer and pass in an `LLMCallable` with **kwargs as per OpenAI or Anthropic
 llm = OpenAIAdapter(client, model="gpt-4o")
-optimizer = PipelineOptimizer(llm)
+optimizer = Optimizer(llm)
 ```
 
 Or bring your own LLM provider, or any function that returns a string.
@@ -44,11 +44,11 @@ def custom_generate_text(prompt: str, model_name: str) -> str:
 
 # Use CustomAdapter with your custom function
 custom_llm = CustomAdapter(generate_func=custom_generate_text, model_name="custom-model")
-optimizer = PipelineOptimizer(custom_llm)
+optimizer = Optimizer(custom_llm)
 ```
 
 ### Running the Optimization
-Define your pipeline function and run it using the optimizer.
+Define your program function and run it using the optimizer.
 ``` py
 # Define a template for evaluating the final answer
 exact_match_evaluator = dedent(
@@ -59,7 +59,7 @@ exact_match_evaluator = dedent(
     <expected_answer>.
 
     <question>{query}</question>
-    <assistant_response>{pipeline_output}</assistant_response>
+    <assistant_response>{program_output}</assistant_response>
     <expected_answer>{golden_answer}</expected_answer>
     """
 )
@@ -73,7 +73,7 @@ data = [{
 # Run optimization
 optimizer.optimize(
     iterations=1,
-    pipeline_func=answer_query,
+    program_func=answer_query,
     evaluation_template=exact_match_evaluator,
     data=data,
 )

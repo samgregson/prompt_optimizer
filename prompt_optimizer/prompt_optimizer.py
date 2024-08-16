@@ -134,7 +134,7 @@ class Node:
         self.call_history: List[Dict[str, Any]] = []
         self.signature = inspect.signature(func)
         self.context_params = context_params
-        self.optimizer: "PipelineOptimizer" = None
+        self.optimizer: "Optimizer" = None
         self.llm: LLMCallable = None
 
     @property
@@ -158,6 +158,7 @@ class Node:
             logging.warning(f"Node ``{self.name}`` has no optimizer attached")
 
         bound_args = self._bind_args(args, kwargs)
+        logging.info(f"Node `{self.name}` bound args: {bound_args}")
 
         try:
             result = self.func(*bound_args.args, **bound_args.kwargs)
@@ -228,7 +229,7 @@ class Node:
             for dep_node, dep_var in dependancies
         ]
 
-    def set_optimizer(self, optimizer: "PipelineOptimizer"):
+    def set_optimizer(self, optimizer: "Optimizer"):
         """Sets the optimizer for this Node and its components"""
         self.optimizer = optimizer
         for variable in self.variable_dict.values():
@@ -239,7 +240,7 @@ P = ParamSpec("P")
 
 
 def llm_node(context_params: List[str] | None = None, **variables):
-    """Decorator to define a node in the pipeline."""
+    """Decorator to define a node in the program."""
     if context_params is None:
         context_params = []
 
@@ -256,14 +257,14 @@ def llm_node(context_params: List[str] | None = None, **variables):
 
         # add the node to the node_registry
         node_registry[func.__name__] = node
-        logging.info(f"Node {func.__name__} added to registry")
+        logging.info(f"Node `{func.__name__}` added to registry")
 
         return wrapper
 
     return decorator
 
 
-class PipelineOptimizer:
+class Optimizer:
     """
     Manages the nodes, their execution order, dependencies,
     and optimization process.
@@ -312,15 +313,15 @@ class PipelineOptimizer:
             for variable in node.variable_dict.values():
                 variable.feedback.clear()
 
-    def forward(self, pipeline_func: Callable, *args, **kwargs) -> Any:
+    def forward(self, program_func: Callable, *args, **kwargs) -> Any:
         """
-        Runs the pipeline and clears history before execution, returning the
+        Runs the program and clears history before execution, returning the
         unwrapped final output.
         """
         self._reset_dependancies()
-        allowed_keys = inspect.signature(pipeline_func).parameters.keys()
+        allowed_keys = inspect.signature(program_func).parameters.keys()
         filtered_kwargs = {k: v for k, v in kwargs.items() if k in allowed_keys}
-        final_output = pipeline_func(*args, **filtered_kwargs)
+        final_output = program_func(*args, **filtered_kwargs)
         if isinstance(final_output, NodeOutput):
             return final_output.value  # Unwrap the final NodeOutput
         return final_output
@@ -358,12 +359,12 @@ class PipelineOptimizer:
     def optimize(
         self,
         iterations: int,
-        pipeline_func: Callable,
+        program_func: Callable,
         evaluation_template: str,
         data: Union[List[Dict[str, Any]], Dict[str, Any]],
     ) -> Dict[str, Dict[str, Variable]]:
         """
-        Optimizes the pipeline based on feedback from the evaluation function.
+        Optimizes the program based on feedback from the evaluation function.
         """
         self._initialize_nodes()
 
@@ -373,12 +374,12 @@ class PipelineOptimizer:
             for item in data_list:
                 logging.info(f"## Data item: {item} ##")
                 try:
-                    pipeline_output: NodeOutput = self.forward(pipeline_func, **item)
+                    program_output: NodeOutput = self.forward(program_func, **item)
                     logging.info(
-                        f"Pipeline output for iteration {iter}: {pipeline_output}"
+                        f"Program output for iteration {iter}: {program_output}"
                     )
                     evaluation_prompt = evaluation_template.format(
-                        pipeline_ouput=pipeline_output, **item
+                        program_ouput=program_output, **item
                     )
                     self.feedback = self.llm.generate_text(prompt=evaluation_prompt)
                     logging.info(f"Feedback for iteration {iter}: {self.feedback}")
