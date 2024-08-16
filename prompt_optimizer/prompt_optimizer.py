@@ -150,7 +150,7 @@ class Node:
     def forward(self, *args, **kwargs) -> NodeOutput:
         """
         Performs the forward pass, updating the call history and handling
-        dependencies between nodes.
+        edges between nodes.
         """
         if self.optimizer is not None:
             self.optimizer._pre_node_execution(self.name, self.call_number)
@@ -174,18 +174,19 @@ class Node:
 
     def _bind_args(self, args, kwargs):
         """
-        Binds arguments to the function signature and handles dependancies
+        Binds arguments to the function signature and handles edges
         """
         bound_args = self.signature.bind(*args, **kwargs)
         bound_args.apply_defaults()
 
+        # if inputs to this node is a NodeOuput add an edge
         for param_name, param_value in bound_args.arguments.items():
             if isinstance(param_value, NodeOutput):
-                self.optimizer._add_dependency(
-                    self.name,
-                    self.call_number,
-                    param_value.node_name,
-                    param_value.call_number,
+                self.optimizer._add_edge(
+                    from_node=self.name,
+                    from_call=self.call_number,
+                    to_node=param_value.node_name,
+                    to_call=param_value.call_number,
                 )
                 bound_args.arguments[param_name] = param_value.value
             if param_name in self.variable_dict:
@@ -214,21 +215,24 @@ class Node:
         node_context = call_data["context"]
         node_output = call_data["output"]
 
+        # propegate feedback to input variables
         for variable in self.variable_dict.values():
-            dependencies = self.optimizer.dependencies.get((self.name, call_number), [])
-            output_feedback = self._collect_output_feedback(dependencies)
+            children = self.optimizer.edges.get((self.name, call_number), [])
+            output_feedback = self._collect_output_feedback(children)
             feedback = variable.generate_feedback(
                 node_context, node_output, output_feedback
             )
             variable.feedback.append(feedback)
 
-    def _collect_output_feedback(self, dependancies):
-        """Collects feedback from dependant nodes or the optimizer"""
-        if not dependancies:
+        # propegate feedback to other node input
+
+    def _collect_output_feedback(self, children):
+        """Collects feedback from child nodes or the optimizer"""
+        if not children:
             return [self.optimizer.feedback]
         return [
             self.optimizer.nodes[dep_node].variable_dict[dep_var].feedback
-            for dep_node, dep_var in dependancies
+            for dep_node, dep_var in children
         ]
 
     def set_optimizer(self, optimizer: "Optimizer"):
@@ -268,7 +272,7 @@ def llm_node(context_params: List[str] | None = None, **variables):
 
 class Optimizer:
     """
-    Manages the nodes, their execution order, dependencies,
+    Manages the nodes, their execution order, edges,
     and optimization process.
     """
 
@@ -276,7 +280,7 @@ class Optimizer:
         self.llm = llm
         self.nodes: Dict[str, Node] = {}
         self.execution_order: List[Tuple[str, int]] = []
-        self.dependencies: Dict[Tuple[str, int], set] = {}
+        self.edges: Dict[Tuple[str, int], set] = {}
         self.feedback = ""  # AKA the Loss
 
     def _initialize_nodes(self):
@@ -295,20 +299,18 @@ class Optimizer:
         """Placeholder for any post-execution logic."""
         pass
 
-    def _add_dependency(
-        self, from_node: str, from_call: int, to_node: str, to_call: int
-    ):
-        """Adds a dependency between nodes."""
+    def _add_edge(self, from_node: str, from_call: int, to_node: str, to_call: int):
+        """Adds an edge between nodes."""
         from_key = (from_node, from_call)
         to_key = (to_node, to_call)
-        if from_key not in self.dependencies:
-            self.dependencies[from_key] = set()
-        self.dependencies[from_key].add(to_key)
+        if from_key not in self.edges:
+            self.edges[from_key] = set()
+        self.edges[from_key].add(to_key)
 
-    def _reset_dependancies(self):
-        """Clears the execution history and dependencies."""
+    def _reset_edges(self):
+        """Clears the execution history and edges."""
         self.execution_order.clear()
-        self.dependencies.clear()
+        self.edges.clear()
 
     def zero_grad(self):
         for node in self.nodes.values():
@@ -320,7 +322,7 @@ class Optimizer:
         Runs the program and clears history before execution, returning the
         unwrapped final output.
         """
-        self._reset_dependancies()
+        self._reset_edges()
         allowed_keys = inspect.signature(program_func).parameters.keys()
         filtered_kwargs = {k: v for k, v in kwargs.items() if k in allowed_keys}
         final_output = program_func(*args, **filtered_kwargs)
@@ -329,13 +331,13 @@ class Optimizer:
         return final_output
 
     def _topological_sort(self) -> List[Tuple[str, int]]:
-        """Performs a topological sort on the nodes based on dependencies."""
+        """Performs a topological sort on the nodes based on edges."""
         sorted_nodes = []
         visited = set()
 
         def dfs(node):
             visited.add(node)
-            for dep in self.dependencies.get(node, []):
+            for dep in self.edges.get(node, []):
                 if dep not in visited:
                     dfs(dep)
             sorted_nodes.append(node)
