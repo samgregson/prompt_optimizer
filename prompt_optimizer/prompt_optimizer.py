@@ -31,9 +31,9 @@ class NodeOutput:
     value: Any
 
 
-class OptimizableComponent:
+class Variable:
     """
-    Represents a component within a node that can be optimized based on
+    Represents an input variable within a node that can be optimized based on
     feedback.
     """
 
@@ -47,14 +47,14 @@ class OptimizableComponent:
         self.llm = llm
 
     def update(self):
-        """updates the component based on aggregated feedback"""
+        """updates the variable based on aggregated feedback"""
         if not self.feedback:
             logging.error(f"No feedback available for ``{self.name}``. Skipping update")
             return
 
         feedback = self._aggregate_feedback()
         prompt = prompt_optimiser_prompt.format(
-            component_value=self.value, feedback=feedback
+            variable_value=self.value, feedback=feedback
         )
 
         try:
@@ -66,7 +66,7 @@ class OptimizableComponent:
             else:
                 logging.warning(f"Failed to extract improved value for `{self.name}`")
         except Exception as e:
-            logging.error(f"Error updating component `{self.name}`: {str(e)}")
+            logging.error(f"Error updating variable `{self.name}`: {str(e)}")
 
         logging.info(f"Updated value for `{self.name}`: {self.value}")
         self.feedback.clear()
@@ -81,7 +81,7 @@ class OptimizableComponent:
 
     def generate_feedback(self, context: str, output: str, output_feedback: str) -> str:
         """
-        Generates component feedback based on the given inputs, outputs,
+        Generates variable feedback based on the given inputs, outputs,
         and output feedback.
         """
         prompt = input_feedback_prompt.format(
@@ -123,13 +123,12 @@ class Node:
     def __init__(
         self,
         func: Callable,
-        components: Dict[str, Any],
+        variables: Dict[str, Any],
         context_params: List[str],
     ):
         self.func = func
-        self.components = {
-            name: OptimizableComponent(name, value)
-            for name, value in components.items()
+        self.variable_dict = {
+            name: Variable(name, value) for name, value in variables.items()
         }
         self.name = func.__name__
         self.call_history: List[Dict[str, Any]] = []
@@ -188,8 +187,8 @@ class Node:
                     param_value.call_number,
                 )
                 bound_args.arguments[param_name] = param_value.value
-            if param_name in self.components:
-                bound_args.arguments[param_name] = self.components[param_name].value
+            if param_name in self.variable_dict:
+                bound_args.arguments[param_name] = self.variable_dict[param_name].value
 
         return bound_args
 
@@ -206,40 +205,40 @@ class Node:
         self.call_history.append(call_data)
 
     def backward(self, call_number: int):
-        """Compute gradients for each component during the backward pass."""
+        """Compute gradients for each variable during the backward pass."""
         logging.info(f"backwards pass through `{self.name}`")
         call_data = self.call_history[call_number]
         node_context = call_data["context"]
         node_output = call_data["output"]
 
-        for component in self.components.values():
+        for variable in self.variable_dict.values():
             dependencies = self.optimizer.dependencies.get((self.name, call_number), [])
             output_feedback = self._collect_output_feedback(dependencies)
-            feedback = component.generate_feedback(
+            feedback = variable.generate_feedback(
                 node_context, node_output, output_feedback
             )
-            component.feedback.append(feedback)
+            variable.feedback.append(feedback)
 
     def _collect_output_feedback(self, dependancies):
         """Collects feedback from dependant nodes or the optimizer"""
         if not dependancies:
             return [self.optimizer.feedback]
         return [
-            self.optimizer.nodes[dep_node].components[dep_comp].feedback
-            for dep_node, dep_comp in dependancies
+            self.optimizer.nodes[dep_node].variable_dict[dep_var].feedback
+            for dep_node, dep_var in dependancies
         ]
 
     def set_optimizer(self, optimizer: "PipelineOptimizer"):
         """Sets the optimizer for this Node and its components"""
         self.optimizer = optimizer
-        for component in self.components.values():
-            component.set_llm(optimizer.llm)
+        for variable in self.variable_dict.values():
+            variable.set_llm(optimizer.llm)
 
 
 P = ParamSpec("P")
 
 
-def llm_node(context_params: List[str] | None = None, **components):
+def llm_node(context_params: List[str] | None = None, **variables):
     """Decorator to define a node in the pipeline."""
     if context_params is None:
         context_params = []
@@ -247,7 +246,7 @@ def llm_node(context_params: List[str] | None = None, **components):
     def decorator(func):
         node = Node(
             func=func,
-            components=components,
+            variables=variables,
             context_params=context_params,
         )
 
@@ -310,8 +309,8 @@ class PipelineOptimizer:
 
     def zero_grad(self):
         for node in self.nodes.values():
-            for component in node.components.values():
-                component.feedback.clear()
+            for variable in node.variable_dict.values():
+                variable.feedback.clear()
 
     def forward(self, pipeline_func: Callable, *args, **kwargs) -> Any:
         """
@@ -353,8 +352,8 @@ class PipelineOptimizer:
 
     def step(self):
         for node in self.nodes.values():
-            for component in node.components.values():
-                component.update()
+            for variable in node.variable_dict.values():
+                variable.update()
 
     def optimize(
         self,
@@ -362,7 +361,7 @@ class PipelineOptimizer:
         pipeline_func: Callable,
         evaluation_template: str,
         data: Union[List[Dict[str, Any]], Dict[str, Any]],
-    ) -> Dict[str, Dict[str, OptimizableComponent]]:
+    ) -> Dict[str, Dict[str, Variable]]:
         """
         Optimizes the pipeline based on feedback from the evaluation function.
         """
@@ -390,12 +389,12 @@ class PipelineOptimizer:
                     logging.error(f"An error occurred: {e}")
                     break
 
-        return {name: node.components for name, node in self.nodes.items()}
+        return {name: node.variable_dict for name, node in self.nodes.items()}
 
     def get_prompt_info(self):
         info = ""
         for node_key, node in self.nodes.items():
             info += f"Node: `{node_key}`\n"
-            for component_key, component in node.components.items():
-                info += f"  {component_key}: {component.value}\n"
+            for variable in node.variable_dict.values():
+                info += f"  {variable.name}: {variable.value}\n"
         return info

@@ -92,7 +92,7 @@ prompt_optimiser_prompt = dedent(
     ensuring that the improvements are targeted and relevant.
 
     <original_prompt>
-    {component_value}
+    {variable_value}
     </original_prompt>
 
     <feedback>
