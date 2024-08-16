@@ -1,7 +1,7 @@
 from textwrap import dedent
 
 
-input_feedback_prompt = dedent(
+variable_feedback_prompt = dedent(
     """
     - You are tasked with providing detailed feedback for the prompt
     of an LLM call
@@ -26,65 +26,7 @@ input_feedback_prompt = dedent(
     """
 )
 
-final_output_evaluation_prompt = dedent(
-    """
-    You are an evaluator tasked with assessing the quality of a generated
-    Grasshopper script. Most importantly the script should acheive the task
-    as given by the task description. A golden example is provided for
-    reference as to what an ideal solution could look like.
-    *Note*: The output may be valid even if it is not an exact match
-    to the golden example.Your assessment should focus on the quality and
-    validity of the script within the Grasshopper environment.
-
-    ## Parameters that will be provided:
-    - <golden_example>, provided for reference
-    - generated <output>, to be evaluated
-    - <task_description>
-
-    Provide a detailed assessment of the generated output, highlighting
-    any potential issues, and overall quality and validity.
-
-    Your evaluation should cover the following criteria:
-
-    ### Accuracy:
-    - The output should correctly implement the logic and functionality as
-    intended.
-    - It should produce the expected results when compared against the golden
-    example.
-
-    ### Completeness:
-    - The output should cover all required aspects and components as specified
-    in the task.
-    - No essential parts should be missing.
-
-    ### Validity:
-    - It should not produce any errors or warnings when executed.
-
-    ### Task Description Alignment:
-    - The output should address all the objectives outlined in the task
-    description.
-    - It should cover all inputs or conditions specified by the task
-    description.
-
-    Evaluate the quality and validity of the <output>, against the description
-    of the <task_description>. A golden example has been provided given for
-    reference as a potential valid solution.
-
-    <task_description>
-    {description}
-    </task_description>
-
-    <output>
-    {output}
-    </output>
-
-    <golden_example>
-    {golden_example}
-    </golden_example>
-    """
-)
-
-prompt_optimiser_prompt = dedent(
+variable_optimiser_prompt = dedent(
     """
     You are an expert in optimizing technical documentation.
     Your task is to improve a prompt based on provided feedback.

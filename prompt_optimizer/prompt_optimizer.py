@@ -6,8 +6,8 @@ from functools import wraps
 import inspect
 from prompt_optimizer.llm_adapters.llm_adapter import LLMCallable
 from prompt_optimizer.prompts import (
-    prompt_optimiser_prompt,
-    input_feedback_prompt,
+    variable_optimiser_prompt,
+    variable_feedback_prompt,
 )
 from prompt_optimizer.utils.extract_from_xml import extract_from_xml
 
@@ -53,7 +53,7 @@ class Variable:
             return
 
         feedback = self._aggregate_feedback()
-        prompt = prompt_optimiser_prompt.format(
+        prompt = variable_optimiser_prompt.format(
             variable_value=self.value, feedback=feedback
         )
 
@@ -84,7 +84,7 @@ class Variable:
         Generates variable feedback based on the given inputs, outputs,
         and output feedback.
         """
-        prompt = input_feedback_prompt.format(
+        prompt = variable_feedback_prompt.format(
             context=context,
             output=output,
             current_prompt=self.value,
@@ -206,7 +206,9 @@ class Node:
         self.call_history.append(call_data)
 
     def backward(self, call_number: int):
-        """Compute gradients for each variable during the backward pass."""
+        """
+        Compute feedback for each Variable and NodeOutput in a backward pass.
+        """
         logging.info(f"backwards pass through `{self.name}`")
         call_data = self.call_history[call_number]
         node_context = call_data["context"]
@@ -345,6 +347,7 @@ class Optimizer:
         return list(reversed(sorted_nodes))
 
     def backward(self):
+        """Compute feedback for each variable during the backward pass."""
         sorted_nodes = self._topological_sort()
         logging.info(f"sorted_nodes: {sorted_nodes}")
 
