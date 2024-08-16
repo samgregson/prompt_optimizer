@@ -224,7 +224,7 @@ class Node:
         node_context = state.context
         node_output = state.output
 
-        output_feedback = self._collect_output_feedback(program_feedback)
+        output_feedback = self._collect_output_feedback(state, program_feedback)
 
         # propegate feedback to input variables
         for variable in self.optimizable_variables.values():
@@ -232,14 +232,22 @@ class Node:
                 node_context, node_output, output_feedback
             )
             variable.feedback.append(variable_feedback)
-        # TODO: propegate feedback to other node input
+        # propegate feedback to input variables
+        for variable in state.inputs:
+            variable_feedback = variable.generate_feedback(
+                node_context, node_output, output_feedback
+            )
+            variable.feedback.append(variable_feedback)
 
-    def _collect_output_feedback(self, program_feedback):
+    def _collect_output_feedback(self, state: NodeState, program_feedback: str):
         """Collects feedback from child nodes or the optimizer"""
         if program_feedback:
             return program_feedback
         else:
-            raise NotImplementedError("sequential programs not yet supported")
+            feedback = state.output.feedback
+            if not feedback:
+                raise ValueError(f"No output feedback exists for `{self.name}")
+            return feedback
 
     def set_optimizer(self, optimizer: "Optimizer"):
         """Sets the optimizer for this Node and its components"""
