@@ -4,7 +4,7 @@ from abc import ABC
 from dataclasses import dataclass
 from functools import wraps
 from textwrap import dedent
-from typing import Any, Callable, Dict, List, ParamSpec, Set, Union
+from typing import Any, Callable, Dict, List, OrderedDict, ParamSpec, Union
 
 from prompt_optimizer.llm_adapters.llm_adapter import LLMCallable
 from prompt_optimizer.prompts import (
@@ -14,10 +14,13 @@ from prompt_optimizer.prompts import (
 from prompt_optimizer.utils.extract_from_xml import extract_from_xml
 
 logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
 )
 
 node_registry: Dict[str, "Node"] = {}
+IMPROVED_PROMPT_TAG = "improved_prompt"
 
 
 class Variable(ABC):
@@ -28,13 +31,11 @@ class Variable(ABC):
     def __init__(self, name: str, value: Any):
         self.name = name
         self.value = value
-        self.feedback = []
-        self.llm: LLMCallable = None
+        self._feedback = []
 
-    def set_llm(self, llm: LLMCallable):
-        self.llm = llm
-
-    def generate_feedback(self, context: str, output: str, output_feedback: str) -> str:
+    def generate_feedback(
+        self, context: str, output: str, output_feedback: str, llm: LLMCallable
+    ) -> str:
         """
         Generates variable feedback based on the given inputs, outputs,
         and output feedback.
@@ -46,19 +47,18 @@ class Variable(ABC):
             output_feedback=output_feedback,
         )
         try:
-            feedback = self.llm.generate_text(prompt=prompt)
+            feedback = llm.generate_text(prompt=prompt)
             logging.info(f"Generated feedback for `{self.name}`: {feedback}")
-            return feedback
+            self._feedback.append(feedback)
         except Exception as e:
             logging.error(f"Error generating feedback for `{self.name}`: {str(e)}")
-            return ""
 
-    def _aggregate_feedback(self):
+    def get_feedback(self, llm: LLMCallable):
         """
         Aggregates feedback by LLM sumarisation if required, concatination
         otherwise
         """
-        agg_feedback = "\n".join(self.feedback)
+        agg_feedback = "\n".join(self._feedback)
         if len(agg_feedback) > 1000:
             prompt = dedent(
                 f"""
@@ -68,7 +68,7 @@ class Variable(ABC):
                 """
             )
             try:
-                agg_feedback = self.llm.generate_text(prompt=prompt)
+                agg_feedback = llm.generate_text(prompt=prompt)
             except Exception as e:
                 logging.error(f"Error summarising feedback for `{self.name}`: {str(e)}")
         return agg_feedback
@@ -83,6 +83,8 @@ class TransitionVariable(Variable):
     def __init__(self, node: "Node", value: Any):
         self.node = node
         self.value = value
+        self.name = f"`{node.name}` output"
+        self._feedback = []
 
 
 class OptimizableVariable(Variable):
@@ -91,19 +93,19 @@ class OptimizableVariable(Variable):
     feedback.
     """
 
-    def update(self):
+    def update(self, llm: LLMCallable):
         """updates the variable based on aggregated feedback"""
-        if not self.feedback:
+        if not self._feedback:
             logging.error(f"No feedback available for ``{self.name}``. Skipping update")
             return
 
-        feedback = self._aggregate_feedback()
+        feedback = self.get_feedback(llm=llm)
         prompt = variable_optimiser_prompt.format(
             variable_value=self.value, feedback=feedback
         )
 
         try:
-            response = self.llm.generate_text(prompt=prompt)
+            response = llm.generate_text(prompt=prompt)
             improved_value = self._extract_improved_value(response)
 
             if improved_value:
@@ -114,11 +116,11 @@ class OptimizableVariable(Variable):
             logging.error(f"Error updating variable `{self.name}`: {str(e)}")
 
         logging.info(f"Updated value for `{self.name}`: {self.value}")
-        self.feedback.clear()
+        self._feedback.clear()
 
     def _extract_improved_value(self, response: str) -> str:
         """Extracts the improved value from the response."""
-        improved_prompt = extract_from_xml(response, "improved_prompt")
+        improved_prompt = extract_from_xml(response, IMPROVED_PROMPT_TAG)
         return improved_prompt[0] if improved_prompt else None
 
 
@@ -145,8 +147,8 @@ class Node:
         self.signature = inspect.signature(func)
         self.context_params = context_params
         self.optimizer: "Optimizer" = None
-        self.llm: LLMCallable = None
-        self.current_state: NodeState = (None,)
+        self.current_state: NodeState = None
+        self.output = TransitionVariable(self, None)
 
     def __call__(self, *args: Any, **kwargs: Any) -> TransitionVariable:
         return self.forward(*args, **kwargs)
@@ -157,61 +159,91 @@ class Node:
         relationships between nodes.
         """
 
-        bound_args = self._bind_args(args, kwargs)
-        logging.info(f"Node `{self.name}` bound args: {bound_args}")
+        all_kwargs = self._get_all_kwargs(args, kwargs)
+        context = self._extract_context(all_kwargs)
+        input_variables = self._extract_input_variables(all_kwargs)
+        all_kwargs = self._unwrap_input_arguments(all_kwargs)
+        all_kwargs = self._override_optimizable_variables(all_kwargs)
+
+        logging.info(f"Node `{self.name}` bound args: {all_kwargs}")
 
         try:
-            result = self.func(*bound_args.args, **bound_args.kwargs)
+            result = self.func(**all_kwargs)
+            logging.info(f"Node `{self.name}` execution result: {result}")
         except Exception as e:
             result = f"Error executing Node `{self.name}`: {e}"
 
-        logging.info(f"Node `{self.name}` execution result: {result}")
+        self.output.value = result
+        # output = TransitionVariable(self, result)
+        self._set_current_state(input_variables, context, self.output)
 
-        self._set_current_state(bound_args, result)
-        self.optimizer._post_node_execution(self)
+        if self.optimizer is None:
+            logging.warning(f"node `{self.name}` has no optimizer attached")
+        else:
+            self.optimizer._add_state_to_stack(self.current_state)
 
-        return TransitionVariable(self, result)
+        return self.output
 
-    def _bind_args(self, args, kwargs):
+    def _get_all_kwargs(self, args, kwargs):
         """
-        Binds arguments to the function signature and handles relationships
+        Binds arguments to the function signature
         """
         bound_args = self.signature.bind(*args, **kwargs)
         bound_args.apply_defaults()
 
-        for arg_name, input in bound_args.arguments.items():
+        return bound_args.arguments
+
+    def _unwrap_input_arguments(self, all_kwargs: OrderedDict[str, Any]):
+        """
+        Extracts just the value from TransitionVariables
+        """
+        for arg_name, input in all_kwargs.items():
             if isinstance(input, TransitionVariable):
                 # extract (unwrap) Variable value
-                bound_args.arguments[arg_name] = input.value
+                all_kwargs[arg_name] = input.value
+
+        return all_kwargs
+
+    def _override_optimizable_variables(self, all_kwargs: OrderedDict[str, Any]):
+        """
+        Overrides the values of optimizable variables in the given bound arguments.
+        """
+        for arg_name, input in all_kwargs.items():
             if arg_name in self.optimizable_variables:
                 # override OptimizableVariable value
-                bound_args.arguments[arg_name] = self.optimizable_variables[
-                    arg_name
-                ].value
+                all_kwargs[arg_name] = self.optimizable_variables[arg_name].value
 
-        return bound_args
+        return all_kwargs
 
-    def _set_current_state(self, bound_args: inspect.BoundArguments, result):
+    def _set_current_state(
+        self,
+        input_variables: List[TransitionVariable],
+        context: Any,
+        result: TransitionVariable,
+    ):
         """Creates a NodeVisit instance with the current execution data."""
-        inputVariables = self._extract_input_variables(bound_args)
-        context = self._extract_context(bound_args)
 
         self.current_state = NodeState(
             node=self,
             context=context,
-            inputs=inputVariables,
+            inputs=input_variables,
             output=result,
         )
 
-    def _extract_context(self, bound_args: inspect.BoundArguments):
-        context = {
-            k: v for k, v in bound_args.arguments.items() if k in self.context_params
-        }
+    def _extract_context(self, all_kwargs: OrderedDict[str, Any]):
+        """Extract context as defined by `context_params` as Dict from kwargs"""
+        context = {}
+        for key, value in all_kwargs.items():
+            if key in self.context_params:
+                value_string = (
+                    value.value if isinstance(value, TransitionVariable) else str(value)
+                )
+                context[key] = value_string
         return context
 
-    def _extract_input_variables(self, bound_args):
+    def _extract_input_variables(self, all_kwargs: OrderedDict[str, Any]):
         inputVariables = []
-        for arg_name, input in bound_args.arguments.items():
+        for arg_name, input in all_kwargs.items():
             if isinstance(input, TransitionVariable):
                 inputVariables.append(input)
         return inputVariables
@@ -222,29 +254,37 @@ class Node:
         """
         logging.info(f"backwards pass through `{self.name}`")
         node_context = state.context
-        node_output = state.output
+        node_output = state.output.value
 
-        output_feedback = self._collect_output_feedback(state, program_feedback)
+        output_feedback = self._collect_output_feedback(
+            state=state, llm=self.optimizer.llm, program_feedback=program_feedback
+        )
 
         # propegate feedback to input variables
         for variable in self.optimizable_variables.values():
-            variable_feedback = variable.generate_feedback(
-                node_context, node_output, output_feedback
+            variable.generate_feedback(
+                context=node_context,
+                output=node_output,
+                llm=self.optimizer.llm,
+                output_feedback=output_feedback,
             )
-            variable.feedback.append(variable_feedback)
         # propegate feedback to input variables
         for variable in state.inputs:
-            variable_feedback = variable.generate_feedback(
-                node_context, node_output, output_feedback
+            variable.generate_feedback(
+                context=node_context,
+                output=node_output,
+                llm=self.optimizer.llm,
+                output_feedback=output_feedback,
             )
-            variable.feedback.append(variable_feedback)
 
-    def _collect_output_feedback(self, state: NodeState, program_feedback: str):
+    def _collect_output_feedback(
+        self, state: NodeState, llm: LLMCallable, program_feedback: str
+    ):
         """Collects feedback from child nodes or the optimizer"""
         if program_feedback:
             return program_feedback
         else:
-            feedback = state.output.feedback
+            feedback = state.output.get_feedback(llm)
             if not feedback:
                 raise ValueError(f"No output feedback exists for `{self.name}")
             return feedback
@@ -252,8 +292,7 @@ class Node:
     def set_optimizer(self, optimizer: "Optimizer"):
         """Sets the optimizer for this Node and its components"""
         self.optimizer = optimizer
-        for variable in self.optimizable_variables.values():
-            variable.set_llm(optimizer.llm)
+        optimizer.nodes[self.name] = self
 
 
 P = ParamSpec("P")
@@ -295,24 +334,23 @@ class Optimizer:
         self.nodes: Dict[str, Node] = {}
         self.execution_stack: List[NodeState] = []
 
-    def _initialize_nodes(self):
+    def initialize_nodes(self):
         """Adds Nodes to Optimizer and assigns Optimizer to Nodes"""
-        logging.info("Attaching nodes to optimizer")
+        logging.info(f"Attaching nodes to optimizer: {' '.join(node_registry.keys())}")
 
         for name, node in node_registry.items():
             node.set_optimizer(self)
-            self.nodes[name] = node
 
-    def _post_node_execution(self, node: Node):
+    def _add_state_to_stack(self, state: NodeState):
         """Add node state to stack"""
-        self.execution_stack.append(node.current_state)
+        self.execution_stack.append(state)
 
     def zero_grad(self):
         for node in self.nodes.values():
             for variable in node.optimizable_variables.values():
-                variable.feedback.clear()
+                variable._feedback.clear()
 
-    def forward(self, program_func: Callable, *args, **kwargs) -> Any:
+    def forward(self, program_func: Callable, *args, **kwargs) -> str:
         """
         Runs the program and clears history before execution, returning the
         unwrapped final output.
@@ -343,7 +381,7 @@ class Optimizer:
     def step(self):
         for node in self.nodes.values():
             for variable in node.optimizable_variables.values():
-                variable.update()
+                variable.update(llm=self.llm)
 
     def optimize(
         self,
@@ -355,7 +393,7 @@ class Optimizer:
         """
         Optimizes the program based on feedback from the evaluation function.
         """
-        self._initialize_nodes()
+        self.initialize_nodes()
 
         for iter in range(iterations):
             logging.info(f"#### Iteration {iter} ####")
@@ -363,17 +401,12 @@ class Optimizer:
             for item in data_list:
                 logging.info(f"## Data item: {item} ##")
                 try:
-                    program_output: TransitionVariable = self.forward(
-                        program_func, **item
-                    )
+                    program_output: str = self.forward(program_func, **item)
                     logging.info(
                         f"Program output for iteration {iter}: {program_output}"
                     )
-                    evaluation_prompt = evaluation_template.format(
-                        program_ouput=program_output, **item
-                    )
-                    logging.info(
-                        f"Eval prompt for iteration {iter}: {evaluation_prompt}"
+                    evaluation_prompt = self._format_evaluation_prompt(
+                        evaluation_template, item, program_output
                     )
                     feedback = self.llm.generate_text(prompt=evaluation_prompt)
                     logging.info(f"Feedback for iteration {iter}: {feedback}")
@@ -382,9 +415,29 @@ class Optimizer:
                     self.zero_grad()
                 except Exception as e:
                     logging.error(f"An error occurred: {e}")
-                    break
+                    raise e
 
         return {name: node.optimizable_variables for name, node in self.nodes.items()}
+
+    def _format_evaluation_prompt(
+        self, evaluation_template: str, item: Dict[str, Any], program_output: str
+    ):
+        try:
+            evaluation_prompt = evaluation_template.format(
+                program_output=program_output, **item
+            )
+            return evaluation_prompt
+        except Exception as e:
+            error = dedent(
+                f"""
+                Error formatting evaluation prompt
+                Check for typos in your dataset and template
+                Eval template:{evaluation_template}
+                args: 'program_output', {item}
+                """
+            )
+            logging.error(error)
+            raise e
 
     def get_prompt_info(self):
         info = ""
